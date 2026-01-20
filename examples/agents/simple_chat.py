@@ -5,6 +5,8 @@
 # the root directory of this source tree.
 import os
 
+import inspect
+
 import fire
 from llama_stack_client import LlamaStackClient, Agent, AgentEventLogger
 from termcolor import colored
@@ -43,15 +45,25 @@ def main(host: str, port: int, model_id: str | None = None):
 
     print(f"Using model: {model_id}")
 
-    agent = Agent(
-        client,
-        model=model_id,
-        instructions="",
-        tools=["builtin::websearch"],
-        input_shields=available_shields,
-        output_shields=available_shields,
-        enable_session_persistence=False,
-    )
+    agent_kwargs = {
+        "model": model_id,
+        "instructions": "",
+        # OpenAI Responses tool schema requires a type discriminator.
+        "tools": [{"type": "web_search"}],
+        "input_shields": available_shields,
+        "output_shields": available_shields,
+        "enable_session_persistence": False,
+    }
+    allowed_params = set(inspect.signature(Agent.__init__).parameters)
+    filtered_kwargs = {k: v for k, v in agent_kwargs.items() if k in allowed_params}
+    try:
+        agent = Agent(client, **filtered_kwargs)
+    except TypeError as exc:
+        # Fallback for older clients that only accept string tool names.
+        if "Unsupported tool type" not in str(exc):
+            raise
+        filtered_kwargs["tools"] = ["builtin::websearch"]
+        agent = Agent(client, **filtered_kwargs)
     user_prompts = [
         "Hello",
         "Search web for which players played in the winning team of the NBA western conference semifinals of 2024",
@@ -65,8 +77,8 @@ def main(host: str, port: int, model_id: str | None = None):
             session_id=session_id,
         )
 
-        for log in AgentEventLogger().log(response):
-            log.print()
+        for printable in AgentEventLogger().log(response):
+            print(printable, end="", flush=True)
 
 
 if __name__ == "__main__":
