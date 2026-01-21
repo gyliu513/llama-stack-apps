@@ -46,9 +46,6 @@ def main(host: str, port: int, model_id: str | None = None):
         client,
         model=model_id,
         instructions="You are a helpful assistant. Use the tools you have access to for providing relevant answers.",
-        sampling_params={
-            "strategy": {"type": "top_p", "temperature": 1.0, "top_p": 0.9},
-        },
         tools=[
             calculator,
             get_ticker_data,
@@ -57,8 +54,9 @@ def main(host: str, port: int, model_id: str | None = None):
             WebSearchTool(engine, api_key),
         ],
     )
+
     session_id = agent.create_session("test-session")
-    print(f"Created session_id={session_id} for Agent({agent.agent_id})")
+    print(f"Created session_id={session_id}")
 
     user_prompts = [
         "What was the closing price of Google stock (ticker symbol GOOG) for 2023 ?",
@@ -72,8 +70,8 @@ def main(host: str, port: int, model_id: str | None = None):
             session_id=session_id,
         )
 
-        for log in AgentEventLogger().log(response):
-            log.print()
+        for printable in AgentEventLogger().log(response):
+            print(printable, end="", flush=True)
 
 
 if __name__ == "__main__":

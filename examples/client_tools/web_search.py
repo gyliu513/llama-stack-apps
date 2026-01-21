@@ -6,13 +6,12 @@
 
 import asyncio
 import json
-from typing import Dict
+from typing import Dict, Any
 
 import httpx
 import requests
 
 from llama_stack_client.lib.agents.client_tool import ClientTool
-from llama_stack_client.types.tool_def_param import Parameter
 
 
 class BraveSearch:
@@ -171,15 +170,22 @@ class WebSearchTool(ClientTool):
     def get_description(self) -> str:
         return "Search the web for a given query"
 
-    def get_params_definition(self) -> Dict[str, Parameter]:
+    def get_input_schema(self) -> Dict[str, Any]:
         return {
-            "query": Parameter(
-                name="query",
-                parameter_type="str",
-                description="The query to search for",
-                required=True,
-            )
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The query to search for",
+                }
+            },
+            "required": ["query"],
         }
 
     def run_impl(self, query: str):
+        return self.engine.search(query)
+
+    async def async_run_impl(self, query: str):
+        if hasattr(self.engine, "asearch"):
+            return await self.engine.asearch(query)
         return self.engine.search(query)
