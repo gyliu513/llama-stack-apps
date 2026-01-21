@@ -19,10 +19,32 @@ from examples.interior_design_assistant.utils import (
 )
 
 from llama_stack_client import LlamaStackClient
-from llama_stack_client.types import agent_create_params
+from examples.agents.utils import check_model_is_available
 
 
 MODEL = "Llama3.2-11B-Vision-Instruct"
+
+
+def _get_model_id(model) -> str | None:
+    for attr in ("identifier", "model_id", "id", "name"):
+        value = getattr(model, attr, None)
+        if isinstance(value, str):
+            return value
+    return None
+
+
+def _get_any_available_vision_model(client: LlamaStackClient) -> str | None:
+    candidates = []
+    for model in client.models.list():
+        model_id = _get_model_id(model)
+        if not model_id:
+            continue
+        model_id_lower = model_id.lower()
+        if any(token in model_id_lower for token in ("vision", "multimodal", "mm")):
+            candidates.append(model_id)
+    if candidates:
+        return candidates[0]
+    return None
 
 
 def main(host: str, port: int, image_dir: str, output_dir: str):
@@ -32,14 +54,7 @@ def main(host: str, port: int, image_dir: str, output_dir: str):
         for i, file_ in enumerate(glob.glob(os.path.join(image_dir, p))):
             paths.append(os.path.basename(file_))
 
-    cfg = agent_create_params.AgentConfig(
-        model=MODEL,
-        instructions="",
-        sampling_params=agent_create_params.SamplingParams(
-            strategy="greedy", temperature=0.0
-        ),
-        enable_session_persistence=False,
-    )
+    selected_model = MODEL
     # check if output dir exists, if not create it
     if not os.path.exists(output_dir):
         os.makedirs(output_dir, exist_ok=True)
@@ -47,6 +62,19 @@ def main(host: str, port: int, image_dir: str, output_dir: str):
     memory_dir = Path(output_dir)
 
     client = LlamaStackClient(base_url=f"http://{host}:{port}")
+    if not check_model_is_available(client, selected_model):
+        fallback_model = _get_any_available_vision_model(client)
+        if fallback_model is None:
+            raise RuntimeError(
+                "No vision-capable model found. Please start the stack with a vision model."
+            )
+        print(f"Model '{selected_model}' not found. Using '{fallback_model}' instead.")
+        selected_model = fallback_model
+
+    agent_kwargs = {
+        "model": selected_model,
+        "instructions": "",
+    }
 
     paths = sorted(paths)
     for p in paths:
@@ -55,19 +83,17 @@ def main(host: str, port: int, image_dir: str, output_dir: str):
             "role": "user",
             "content": [
                 {
-                    "type": "image",
-                    "url": {
-                        "uri": data_url_from_image(full_path),
-                    },
+                    "type": "input_image",
+                    "image_url": data_url_from_image(full_path),
                 },
                 {
-                    "type": "text",
+                    "type": "input_text",
                     "text": "Describe the design, style, color, material and other aspects of the fireplace in this photo. Respond in one paragraph, no bullet points or sections.",
                 },
             ],
         }
 
-        response = create_single_turn(client, cfg, [message])
+        response = create_single_turn(client, agent_kwargs, [message])
         response += "\n\n"
         response += f"<uri>{p}</uri>"
 

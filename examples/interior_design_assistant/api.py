@@ -6,60 +6,183 @@
 
 import asyncio
 import json
+import re
 import textwrap
-import uuid
 from pathlib import Path
 from typing import List
 
 import fire
 
-from examples.interior_design_assistant.utils import (
-    create_single_turn,
-    data_url_from_image,
-)
+from examples.interior_design_assistant.utils import data_url_from_image
+from examples.agents.utils import check_model_is_available, get_any_available_model
 
 from llama_stack_client import LlamaStackClient
-from llama_stack_client.types import QueryConfig
-from llama_stack_client.types.agent_create_params import AgentConfig
 
 from termcolor import cprint
 
-MODEL = "meta-llama/Llama-3.2-11B-Vision-Instruct"
+MODEL = "ollama/llama3.2-vision:latest"
+
+
+def _get_model_type(model) -> str | None:
+    for attr in ("model_type", "type", "model_kind", "kind", "model_family"):
+        value = getattr(model, attr, None)
+        if isinstance(value, str):
+            return value
+    for metadata_attr in ("custom_metadata", "metadata"):
+        metadata = getattr(model, metadata_attr, None)
+        if isinstance(metadata, dict):
+            value = metadata.get("model_type") or metadata.get("type")
+            if isinstance(value, str):
+                return value
+    return None
+
+
+def _get_model_id(model) -> str | None:
+    for attr in ("identifier", "model_id", "id", "name"):
+        value = getattr(model, attr, None)
+        if isinstance(value, str):
+            return value
+    return None
+
+
+def _get_any_available_embedding_model(client: LlamaStackClient) -> str | None:
+    embedding_models = [
+        model_id
+        for model in client.models.list()
+        for model_id in [_get_model_id(model)]
+        if model_id
+        and (
+            _get_model_type(model) == "embedding"
+            or "embedding" in model_id.lower()
+            or "embed" in model_id.lower()
+        )
+    ]
+    if not embedding_models:
+        return None
+    return embedding_models[0]
+
+
+def _get_embedding_dimension(client: LlamaStackClient, model_id: str) -> int | None:
+    try:
+        response = client.embeddings.create(model=model_id, input="dimension probe")
+    except Exception:
+        return None
+    if not response.data:
+        return None
+    embedding = response.data[0].embedding
+    if isinstance(embedding, list):
+        return len(embedding)
+    return None
+
+
+def _get_any_available_vision_model(client: LlamaStackClient) -> str | None:
+    candidates = []
+    for model in client.models.list():
+        model_id = _get_model_id(model)
+        if not model_id:
+            continue
+        model_id_lower = model_id.lower()
+        if any(token in model_id_lower for token in ("vision", "multimodal", "mm")):
+            candidates.append(model_id)
+    if candidates:
+        return candidates[0]
+    return None
 
 
 class InterioAgent:
     def __init__(self, document_dir: str, image_dir: str):
         self.document_dir = document_dir
         self.image_dir = image_dir
+        self.client = None
+        self.vector_store_id = None
+        self.vector_store_name = "interio_bank"
+        self.vision_model_id = MODEL
+        self.text_model_id = MODEL
 
     async def initialize(self, host: str, port: int):
         self.client = LlamaStackClient(base_url=f"http://{host}:{port}")
-        # setup agent for inference
-        self.agent_id = await self._get_agent()
+        if not check_model_is_available(self.client, self.vision_model_id):
+            fallback_model = _get_any_available_vision_model(self.client)
+            if fallback_model is None:
+                raise RuntimeError(
+                    "No vision-capable model found. Please start the stack with a vision model."
+                )
+            cprint(
+                f"Model '{self.vision_model_id}' not found. Using '{fallback_model}' instead.",
+                color="yellow",
+            )
+            self.vision_model_id = fallback_model
+        self.text_model_id = get_any_available_model(self.client) or self.vision_model_id
         # setup memory bank for RAG
-        self.bank_id = await self.build_vector_db(self.document_dir)
+        self.vector_store_id = await self.build_vector_store(self.document_dir)
 
-    async def _get_agent(self):
-        agent_config = AgentConfig(
-            model=MODEL,
-            instructions="",
-            sampling_params={"strategy": {"type": "greedy"}},
-            enable_session_persistence=True,
+    def _run_response(
+        self,
+        messages,
+        *,
+        model_id: str,
+        instructions: str | None = None,
+        tools=None,
+        include=None,
+        text_format: dict | None = None,
+    ):
+        response = self.client.responses.create(
+            model=model_id,
+            input=messages,
+            instructions=instructions,
+            tools=tools,
+            include=include,
+            text={"format": text_format} if text_format else None,
+            stream=False,
         )
-        response = self.client.agents.create(
-            agent_config=agent_config,
-        )
-        self.agent_id = response.agent_id
-        return self.agent_id
+        return response.output_text
+
+    @staticmethod
+    def _load_json(text: str):
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+        # Replace control characters that break JSON parsing.
+        cleaned = re.sub(r"[\x00-\x1f]+", " ", text)
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            pass
+        # Attempt to extract the first JSON object/array.
+        for opener, closer in (("{", "}"), ("[", "]")):
+            start = cleaned.find(opener)
+            end = cleaned.rfind(closer)
+            if start != -1 and end != -1 and end > start:
+                snippet = cleaned[start : end + 1]
+                try:
+                    return json.loads(snippet)
+                except json.JSONDecodeError:
+                    continue
+        raise
+
+    @staticmethod
+    def _build_context_from_search(search_results) -> str:
+        if not search_results:
+            return ""
+        context_lines = ["Context from retrieved documents:"]
+        for result in search_results:
+            snippet = " ".join(
+                content.text.strip()
+                for content in result.content
+                if getattr(content, "text", None)
+            ).strip()
+            if not snippet:
+                continue
+            context_lines.append(f"- {result.filename} (score={result.score:.2f}): {snippet}")
+        return "\n".join(context_lines)
 
     async def list_items(self, file_path: str) -> List[str]:
         """
         Analyze the image using multimodal llm
         and return a list of items that are present in the image.
         """
-        assert (
-            self.agent_id is not None
-        ), "Agent not initialized, call initialize() first"
+        assert self.client is not None, "Agent not initialized, call initialize() first"
         text = textwrap.dedent(
             """
             Analyze the image to provide a 4 sentence description of the architecture and furniture items present in it.
@@ -78,37 +201,34 @@ class InterioAgent:
             Please return as suggested format, Do not return any other text or explanations.
             """
         )
-        resposne = self.client.agents.session.create(
-            agent_id=self.agent_id,
-            session_name=uuid.uuid4().hex,
-        )
-        data_url = data_url_from_image(file_path)
+        image_data = data_url_from_image(file_path)
 
         message = {
             "role": "user",
             "content": [
-                {"type": "image", "image": {"url": {"uri": data_url}}},
-                {"type": "text", "text": text},
+                {"type": "input_image", "image_url": image_data},
+                {"type": "input_text", "text": text},
             ],
         }
 
-        response = self.client.agents.turn.create(
-            agent_id=self.agent_id,
-            session_id=resposne.session_id,
-            messages=[message],
-            stream=True,
+        result = self._run_response(
+            [message],
+            model_id=self.vision_model_id,
+            text_format={
+                "type": "json_schema",
+                "name": "interior_list_items",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "description": {"type": "string"},
+                        "items": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["description", "items"],
+                },
+            },
         )
-
-        result = ""
-        for chunk in response:
-            payload = chunk.event.payload
-            if payload.event_type == "turn_complete":
-                turn = payload.turn
-                break
-
-        result = turn.output_message.content
         try:
-            d = json.loads(result.strip())
+            d = self._load_json(result.strip())
         except Exception:
             cprint(f"Error parsing JSON output: {result}", color="red")
             raise
@@ -149,89 +269,44 @@ class InterioAgent:
         )
 
         text = prompt.format(item=item, n=n)
-        data_url = data_url_from_image(file_path)
+        image_data = data_url_from_image(file_path)
 
         message = {
             "role": "user",
             "content": [
-                {"type": "image", "image": {"url": {"uri": data_url}}},
+                {"type": "input_image", "image_url": image_data},
                 {
-                    "type": "text",
+                    "type": "input_text",
                     "text": text,
                 },
             ],
         }
 
-        resposne = self.client.agents.session.create(
-            agent_id=self.agent_id,
-            session_name=uuid.uuid4().hex,
+        result = self._run_response(
+            [message],
+            model_id=self.vision_model_id,
+            text_format={
+                "type": "json_schema",
+                "name": "interior_suggest_alternatives",
+                "schema": {
+                    "type": "array",
+                    "items": {"type": "object", "properties": {"description": {"type": "string"}}, "required": ["description"]},
+                },
+            },
         )
-        generator = self.client.agents.turn.create(
-            agent_id=self.agent_id,
-            session_id=resposne.session_id,
-            messages=[message],
-            stream=True,
-        )
-        result = ""
-        for chunk in generator:
-            payload = chunk.event.payload
-            if payload.event_type == "turn_complete":
-                turn = payload.turn
-
-        result = turn.output_message.content
         print(result)
-        return [r["description"].strip() for r in json.loads(result.strip())]
+        return [r["description"].strip() for r in self._load_json(result.strip())]
 
     async def retrieve_images(self, description: str):
         """
         Retrieve images from the memory bank that match the description
         """
-        assert (
-            self.bank_id is not None
-        ), "Setup bank before calling this method via initialize()"
-
-        agent_config = AgentConfig(
-            enable_session_persistence=False,
-            model=MODEL,
-            instructions="",
-            sampling_params={"strategy": {"type": "greedy"}},
-            toolgroups=[
-                # Enable memory as a tool for RAG
-                {
-                    "name": "builtin::rag",
-                    "args": {
-                        "vector_db_ids": [self.bank_id],
-                        "query_config": QueryConfig(
-                            max_chunks=5,
-                            max_tokens_in_context=4096,
-                            query_generator_config={
-                                "type": "llm",
-                                "model": MODEL,
-                                "template": textwrap.dedent(
-                                    """
-                                You are given a conversation between a user and their assistant.
-                                From this conversation, you need to extract a one sentence description that is being asked for by the user.
-                                This one sentence description will be used to query a memory bank to retrieve relevant images.
-
-                                Analyze the provided conversation and respond with one line description and no other text or explanation.
-
-                                Here is the conversation:
-                                {% for message in messages %}
-                                {{ message.role }}> {{ message.content }}
-                                {% endfor %}
-                                """
-                                ),
-                            },
-                        ),
-                    },
-                },
-            ],
-        )
+        assert self.vector_store_id is not None, "Setup store via initialize()"
 
         prompt = textwrap.dedent(
             """
             You are given a description of an item.
-            Your task is to find images of that item in the memory bank that match the description.
+            Your task is to find images of that item in the documents that match the description.
             Return the top 4 most relevant results.
 
             Return results in the following format:
@@ -256,50 +331,103 @@ class InterioAgent:
         message = {
             "role": "user",
             "content": [
-                {"type": "text", "text": prompt},
-                {"type": "text", "text": description},
+                {"type": "input_text", "text": prompt},
+                {"type": "input_text", "text": description},
             ],
         }
 
-        response = create_single_turn(self.client, agent_config, [message])
-        return json.loads(response.strip())
+        search_response = self.client.vector_stores.search(
+            vector_store_id=self.vector_store_id,
+            query=description,
+            max_num_results=5,
+        )
+        context = self._build_context_from_search(search_response.data)
+        instructions = "You are a helpful assistant."
+        if context:
+            instructions = f"{instructions}\n\n{context}"
+        response = self._run_response(
+            [message],
+            model_id=self.text_model_id,
+            instructions=instructions,
+            text_format={
+                "type": "json_schema",
+                "name": "interior_retrieve_images",
+                "schema": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "image": {"type": "string"},
+                            "description": {"type": "string"},
+                        },
+                        "required": ["image", "description"],
+                    },
+                },
+            },
+        )
+        return self._load_json(response.strip())
 
     # NOTE: If using a persistent memory bank, building on the fly is not needed
     # and LlamaStack apis can leverage existing banks
-    async def build_vector_db(self, local_dir: str) -> str:
+    async def build_vector_store(self, local_dir: str) -> str:
         """
-        Build a vector db that can be used to store and retrieve images.
+        Build a vector store that can be used to store and retrieve images.
         """
-        self.live_bank = "interio_bank"
-        self.client.vector_dbs.register(
-            vector_db_id=self.live_bank,
-            embedding_model="all-MiniLM-L6-v2",
-            embedding_dimension=384,
-        )
-
         local_dir = Path(local_dir)
-        # read all files in the provided local_dir
-        # amd add each file as a document in the memory bank
-        documents = []
-        for i, file in enumerate(local_dir.iterdir()):
-            if file.is_file():
-                with file.open("r") as f:
-                    documents.append(
-                        {
-                            "document_id": uuid.uuid4().hex,
-                            "content": f.read(),
-                            "mime_type": "text/plain",
-                        }
-                    )
-        # insert the documents into the memory bank
-        assert len(documents) > 0, "No documents found in the provided directory"
-        self.client.tool_runtime.rag_tool.insert(
-            vector_db_id=self.live_bank,
-            documents=documents,
-            chunk_size_in_tokens=512,
+        vector_store = next(
+            (
+                store
+                for store in self.client.vector_stores.list()
+                if store.name == self.vector_store_name
+            ),
+            None,
         )
+        if vector_store is None:
+            embedding_model = _get_any_available_embedding_model(self.client)
+            if embedding_model is None:
+                raise RuntimeError("No available embedding model found.")
+            embedding_dimension = _get_embedding_dimension(self.client, embedding_model)
+            if embedding_dimension is None:
+                raise RuntimeError("Unable to determine embedding dimension.")
+            vector_providers = [
+                provider
+                for provider in self.client.providers.list()
+                if provider.api == "vector_io"
+            ]
+            if not vector_providers:
+                raise RuntimeError("No available vector_io providers.")
+            vector_store = self.client.vector_stores.create(
+                name=self.vector_store_name,
+                extra_body={
+                    "provider_id": vector_providers[0].provider_id,
+                    "embedding_model": embedding_model,
+                    "embedding_dimension": embedding_dimension,
+                },
+            )
 
-        return "interio_bank"
+        if vector_store.file_counts.total == 0:
+            for file in local_dir.iterdir():
+                if not file.is_file():
+                    continue
+                with file.open("rb") as handle:
+                    uploaded = self.client.files.create(
+                        file=handle,
+                        purpose="assistants",
+                    )
+                self.client.vector_stores.files.create(
+                    vector_store_id=vector_store.id,
+                    file_id=uploaded.id,
+                    attributes={"document_id": file.name},
+                    chunking_strategy={
+                        "type": "static",
+                        "static": {
+                            "max_chunk_size_tokens": 512,
+                            "chunk_overlap_tokens": 0,
+                        },
+                    },
+                )
+
+        return vector_store.id
 
 
 async def async_main(host: str, port: int, memory_path: str, image_dir: str):
@@ -319,6 +447,7 @@ async def async_main(host: str, port: int, memory_path: str, image_dir: str):
     path = input(
         "Enter Image path (relative to image_dir or memory_path is accepted) >> "
     )
+
     path = Path(path)
 
     options = [
@@ -335,6 +464,17 @@ async def async_main(host: str, port: int, memory_path: str, image_dir: str):
     if not chosen_path:
         cprint(f"No valid path found in {options}", color="red")
         return
+
+    if chosen_path.is_dir():
+        image_exts = {".png", ".jpg", ".jpeg", ".webp"}
+        image_files = sorted(
+            [p for p in chosen_path.iterdir() if p.is_file() and p.suffix.lower() in image_exts]
+        )
+        if not image_files:
+            cprint(f"No image files found in directory: {chosen_path}", color="red")
+            return
+        chosen_path = image_files[0]
+        cprint(f"Using first image in directory: {chosen_path.name}", color="yellow")
 
     result = await interio.list_items(chosen_path)
 

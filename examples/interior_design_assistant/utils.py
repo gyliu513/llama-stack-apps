@@ -6,8 +6,6 @@
 
 import base64
 import mimetypes
-import uuid
-
 
 # TODO: This should move into a common util as will be needed by all apps
 def data_url_from_image(file_path):
@@ -22,27 +20,17 @@ def data_url_from_image(file_path):
     return data_url
 
 
-def create_single_turn(client, agent_config, messages):
-    """Create a single turn agent session and return the response"""
-    response = client.agents.create(agent_config=agent_config)
-    agent_id = response.agent_id
+def image_data_from_image(file_path):
+    with open(file_path, "rb") as image_file:
+        return base64.b64encode(image_file.read()).decode("utf-8")
 
-    response = client.agents.session.create(
-        agent_id=agent_id,
-        session_name=uuid.uuid4().hex,
+
+def create_single_turn(client, agent_kwargs, messages):
+    """Create a single response and return output text."""
+    response = client.responses.create(
+        model=agent_kwargs.get("model"),
+        instructions=agent_kwargs.get("instructions"),
+        input=messages,
+        stream=False,
     )
-    session_id = response.session_id
-
-    generator = client.agents.turn.create(
-        agent_id=agent_id,
-        session_id=session_id,
-        messages=messages,
-        stream=True,
-    )
-
-    for chunk in generator:
-        payload = chunk.event.payload
-        if payload.event_type == "turn_complete":
-            turn = payload.turn
-    print(type(turn))
-    return turn.output_message.content
+    return response.output_text

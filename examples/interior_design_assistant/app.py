@@ -13,7 +13,7 @@ from examples.interior_design_assistant.api import InterioAgent
 
 API = None
 HOST = "localhost"
-PORT = 5000
+PORT = 8321
 PATH = "examples/interior_design_assistant/resources/documents"
 IMG_DIR = "examples/interior_design_assistant/resources/images/fireplaces"
 
