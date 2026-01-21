@@ -4,6 +4,7 @@
 # This source code is licensed under the terms described in the LICENSE file in
 # the root directory of this source tree.
 import base64
+import mimetypes
 from pathlib import Path
 
 import fire
@@ -13,6 +14,15 @@ from termcolor import colored
 from .utils import check_model_is_available
 
 THIS_DIR = Path(__file__).parent
+
+
+def _data_url_from_image(file_path: Path) -> str:
+    mime_type, _ = mimetypes.guess_type(file_path)
+    if mime_type is None:
+        raise ValueError(f"Could not determine MIME type for {file_path}")
+    with open(file_path, "rb") as image_file:
+        encoded_string = base64.b64encode(image_file.read()).decode("utf-8")
+    return f"data:{mime_type};base64,{encoded_string}"
 
 
 def main(host: str, port: int, model_id: str | None = None):
@@ -46,24 +56,18 @@ def main(host: str, port: int, model_id: str | None = None):
         THIS_DIR / "resources" / "dog.png",
         THIS_DIR / "resources" / "pasta.jpeg",
     ]
-    encoded_files = []
-    for file in files:
-        with open(file, "rb") as image_file:
-            base64_data = base64.b64encode(image_file.read()).decode("utf-8")
-            encoded_files.append(base64_data)
+    image_urls = [_data_url_from_image(file) for file in files]
 
     prompts = [
         {
             "role": "user",
             "content": [
                 {
-                    "type": "image",
-                    "image": {
-                        "data": encoded_files[0],
-                    },
+                    "type": "input_image",
+                    "image_url": image_urls[0],
                 },
                 {
-                    "type": "text",
+                    "type": "input_text",
                     "text": "Write a haiku about this image",
                 },
             ],
@@ -72,13 +76,11 @@ def main(host: str, port: int, model_id: str | None = None):
             "role": "user",
             "content": [
                 {
-                    "type": "image",
-                    "image": {
-                        "data": encoded_files[1],
-                    },
+                    "type": "input_image",
+                    "image_url": image_urls[1],
                 },
                 {
-                    "type": "text",
+                    "type": "input_text",
                     "text": "Now update the haiku to include the second image",
                 },
             ],
@@ -92,7 +94,11 @@ def main(host: str, port: int, model_id: str | None = None):
             session_id=session_id,
             stream=False,
         )
-        print(colored("model>", "green"), response.output_message.content)
+        output_text = getattr(response, "output_text", None)
+        if output_text is None:
+            output_message = getattr(response, "output_message", None)
+            output_text = getattr(output_message, "content", "")
+        print(colored("model>", "green"), output_text)
 
 
 if __name__ == "__main__":
