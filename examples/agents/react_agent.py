@@ -10,7 +10,6 @@ import fire
 from llama_stack_client import LlamaStackClient
 from llama_stack_client.lib.agents.event_logger import EventLogger
 from llama_stack_client.lib.agents.react.agent import ReActAgent
-from llama_stack_client.lib.agents.react.tool_parser import ReActOutput
 from termcolor import colored
 
 from .utils import check_model_is_available, get_any_available_model
@@ -52,15 +51,22 @@ def main(host: str, port: int, model_id: str | None = None):
             return
 
     print(colored(f"Using model: {model_id}", "green"))
-    agent = ReActAgent(
-        client=client,
-        model=model_id,
-        tools=["builtin::websearch", torchtune],
-        response_format={
-            "type": "json_schema",
-            "json_schema": ReActOutput.model_json_schema(),
-        },
-    )
+    react_tools = [{"type": "web_search"}, torchtune]
+    try:
+        agent = ReActAgent(
+            client=client,
+            model=model_id,
+            tools=react_tools,
+        )
+    except TypeError as exc:
+        # Fallback for older clients that only accept string tool names.
+        if "Unsupported tool type" not in str(exc):
+            raise
+        agent = ReActAgent(
+            client=client,
+            model=model_id,
+            tools=["builtin::websearch", torchtune],
+        )
 
     session_id = agent.create_session(f"test-session-{uuid.uuid4().hex}")
     user_prompt = "Whats the best place in new york for a pizza slice at 2am ?"
@@ -71,7 +77,7 @@ def main(host: str, port: int, model_id: str | None = None):
         stream=True,
     )
     for log in EventLogger().log(response):
-        log.print()
+        print(log, end="", flush=True)
 
     user_prompt2 = "What are the popular llms supported in torchtune?"
     print(colored(f"User> {user_prompt2}", "blue"))
@@ -81,7 +87,7 @@ def main(host: str, port: int, model_id: str | None = None):
         stream=True,
     )
     for log in EventLogger().log(response2):
-        log.print()
+        print(log, end="", flush=True)
 
 
 if __name__ == "__main__":
