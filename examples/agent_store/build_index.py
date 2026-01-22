@@ -5,13 +5,11 @@ from termcolor import cprint
 
 from examples.agent_store.api import AgentStore
 
-MODEL = "Meta-Llama3.1-8B-Instruct"
-
 
 async def build_index(host, port, file_dir):
-    api = AgentStore(host, port, MODEL)
-    bank_id = await api.build_index(file_dir)
-    cprint(f"Successfully created bank: {bank_id}", color="green")
+    api = AgentStore(host, port)
+    vector_store_id = await api.build_index(file_dir)
+    cprint(f"Successfully created vector store: {vector_store_id}", color="green")
 
 
 def main(host: str, port: int, file_dir: str):

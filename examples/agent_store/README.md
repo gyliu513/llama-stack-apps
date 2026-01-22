@@ -1,7 +1,7 @@
 # AgentStore
 
 The AgentStore app is an example of how to create multiple agents using the llama-stack-client sdk.
-The app shows 2 agents -- one with memory ( aka RAG) and one with web search capabilities.
+The app shows 2 agents -- one with memory (aka RAG) and one with web search capabilities.
 We also provide functionality like chat sessions and attachment uploads.
 There is also an option to take a conversation and add it to a "Live" bank for leveraging it in future conversations.
 
@@ -22,7 +22,7 @@ pip install -r requirements.txt
 1. Start your favorite llama stack distro ie. `llama stack run ...`
 2. Run the app script
 ```
-python -m examples.agent_store.app --help
+PAGER=cat python -m examples.agent_store.app --help
 ```
 You should see some output like this
 ```
@@ -39,17 +39,14 @@ FLAGS
     -p, --port=PORT
         Type: int
         Default: 5000
-    -m, --model=MODEL
-        Type: str
-        Default: 'meta-llama/Llama-3.1-8B-Instruct'
     -b, --bank_ids=BANK_IDS
         Type: str
         Default: ''
 ```
 The host/port refers where your llama stack server is running.
-The Memory agent can also be started by providing a list of comma separated bank-ids.
+The Memory agent can also be started by providing a list of comma separated vector store ids.
 
-To start the app without any pre-existing bank-ids
+To start the app without any pre-existing vector store ids
 ```
 $ python -m examples.agent_store.app localhost 5000
 
@@ -57,10 +54,10 @@ $ python -m examples.agent_store.app localhost 5000
 * Running on local URL:  http://0.0.0.0:7860
 ```
 
-## How to create a memory bank ?
-We provide a simple utility to create a bank.
+## How to create a memory store?
+We provide a simple utility to create a vector store.
 ```
-python -m examples.agent_store.build_index --help
+PAGER=cat python -m examples.agent_store.build_index --help
 ```
 
 will show
@@ -89,23 +86,14 @@ python -m examples.agent_store.build_index localhost 5000 ~/resources/
 # Sample output
 python -m examples.agent_store.build_index localhost 5000 ~/resources/
 
-Successfully created bank: memory_bank
+Successfully created vector store: vs_97c7c129-18ec-4c30-a25e-e0fa9390161e
 ```
-You can then start the app with this pre-filled bank(s) using
+You can then start the app with this pre-filled vector store using
 ```
-python -m examples.agent_store.app localhost 5000 --bank-ids memory_bank
+python -m examples.agent_store.app localhost 5000 --bank_ids vs_97c7c129-18ec-4c30-a25e-e0fa9390161e
 ```
 
-The bank-ids can be obtained by running
-```
-$ llama-stack-client memory_banks list
-
-+--------------+---------------+--------+-------------------+------------------------+--------------------------+
-| identifier   | provider_id   | type   | embedding_model   |   chunk_size_in_tokens |   overlap_size_in_tokens |
-+==============+===============+========+===================+========================+==========================+
-| memory_bank  | meta0         | vector | all-MiniLM-L6-v2  |                    512 |                       64 |
-+--------------+---------------+--------+-------------------+------------------------+--------------------------+
-```
+Vector store ids can be obtained from the `build_index` output above.
 
 ## How to run evaluation ?
 First, you will need to provide a dataset of user input queries to evaluate on and their expected_answers. In the `bulk_generate` script, the script will generate responses using the Memory agent from the app using supplied offline docs and user input query prompts to generate responses.
