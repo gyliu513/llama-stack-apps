@@ -5,13 +5,11 @@
 # the root directory of this source tree.
 import os
 
-import inspect
-
 import fire
 from llama_stack_client import LlamaStackClient, Agent, AgentEventLogger
 from termcolor import colored
 
-from .utils import check_model_is_available, get_any_available_model
+from .utils import check_model_is_available, get_any_available_chat_model
 
 
 def main(host: str, port: int, model_id: str | None = None):
@@ -29,14 +27,8 @@ def main(host: str, port: int, model_id: str | None = None):
         provider_data={"tavily_search_api_key": os.getenv("TAVILY_SEARCH_API_KEY")},
     )
 
-    available_shields = [shield.identifier for shield in client.shields.list()]
-    if not available_shields:
-        print(colored("No available shields. Disabling safety.", "yellow"))
-    else:
-        print(f"Available shields found: {available_shields}")
-
     if model_id is None:
-        model_id = get_any_available_model(client)
+        model_id = get_any_available_chat_model(client)
         if model_id is None:
             return
     else:
@@ -45,25 +37,13 @@ def main(host: str, port: int, model_id: str | None = None):
 
     print(f"Using model: {model_id}")
 
-    agent_kwargs = {
-        "model": model_id,
-        "instructions": "",
+    agent = Agent(
+        client,
+        model=model_id,
+        instructions="",
         # OpenAI Responses tool schema requires a type discriminator.
-        "tools": [{"type": "web_search"}],
-        "input_shields": available_shields,
-        "output_shields": available_shields,
-        "enable_session_persistence": False,
-    }
-    allowed_params = set(inspect.signature(Agent.__init__).parameters)
-    filtered_kwargs = {k: v for k, v in agent_kwargs.items() if k in allowed_params}
-    try:
-        agent = Agent(client, **filtered_kwargs)
-    except TypeError as exc:
-        # Fallback for older clients that only accept string tool names.
-        if "Unsupported tool type" not in str(exc):
-            raise
-        filtered_kwargs["tools"] = ["builtin::websearch"]
-        agent = Agent(client, **filtered_kwargs)
+        tools=[{"type": "web_search"}],
+    )
     user_prompts = [
         "Hello",
         "Search web for which players played in the winning team of the NBA western conference semifinals of 2024",
